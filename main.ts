@@ -2,6 +2,8 @@
 // Routes:
 //   POST /ingest   (admin-only) -> upload transcripts [{ id, title, text }]
 //   POST /retitle  (admin-only) -> update a lecture title { id, title }
+//   POST /wipe     (admin-only) -> delete ALL stored lecture data
+//   POST /stats    (admin-only) -> counts only (no content): {lectures,chunks,vecs,sample}
 //   POST /chat     (front-end)  -> RAG answer, cites lecture titles only
 //   POST /         (legacy)     -> same as /chat
 
@@ -75,7 +77,7 @@ async function handleIngest(req: Request): Promise<Response> {
     for (let i = 0; i < parts.length; i++) {
       const text = parts[i];
       const e = await embedText(text);
-      await kv.set(["lec", it.id, "chunk", i], { text }); // << 64KiB
+      await kv.set(["lec", it.id, "chunk", i], { text }); // each <= 64KiB
       await kv.set(["lec", it.id, "vec",   i], { e });
     }
   }
@@ -93,6 +95,32 @@ async function handleRetitle(req: Request): Promise<Response> {
   if (!meta.value) return cors("not found", 404);
   await kv.set(["lec", body.id, "meta"], { ...meta.value, title: body.title });
   return cors("ok");
+}
+
+// ---------- /wipe (admin-only) ----------
+async function handleWipe(req: Request): Promise<Response> {
+  if (req.headers.get("authorization") !== `Bearer ${ADMIN_TOKEN}`) return cors("unauthorized", 401);
+  let deleted = 0;
+  for await (const e of kv.list({ prefix: ["lec"] })) {
+    await kv.delete(e.key);
+    deleted++;
+  }
+  return cors(`wiped ${deleted} keys`);
+}
+
+// ---------- /stats (admin-only) ----------
+async function handleStats(req: Request): Promise<Response> {
+  if (req.headers.get("authorization") !== `Bearer ${ADMIN_TOKEN}`) return cors("unauthorized", 401);
+  let chunks = 0, vecs = 0, lectures = 0;
+  const titles = new Set<string>();
+  for await (const e of kv.list({ prefix: ["lec"] })) {
+    const k = e.key as Deno.KvKey;
+    if (k.length === 3 && k[2] === "meta") { lectures++; titles.add((e.value as any)?.title ?? ""); }
+    if (k.length === 4 && k[2] === "chunk") chunks++;
+    if (k.length === 4 && k[2] === "vec")   vecs++;
+  }
+  const sample = Array.from(titles).filter(Boolean).slice(0, 10);
+  return cors(JSON.stringify({ lectures, chunks, vecs, sample }, null, 2), 200, "application/json");
 }
 
 // ---------- /chat (front-end) ----------
@@ -202,6 +230,8 @@ serve(async (req: Request): Promise<Response> => {
   const path = new URL(req.url).pathname;
   if (path === "/ingest")  return handleIngest(req);
   if (path === "/retitle") return handleRetitle(req);
+  if (path === "/wipe")    return handleWipe(req);
+  if (path === "/stats")   return handleStats(req);
   if (path === "/chat")    return handleChat(req);
   if (path === "/")        return handleRoot(req);
   return handleChat(req);
