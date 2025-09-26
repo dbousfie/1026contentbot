@@ -1,13 +1,13 @@
-// main.ts — RAG + Qualtrics + syllabus, with fixed titles & sources
+// main.ts — strict RAG + Qualtrics + syllabus
 // Routes:
-//   POST /ingest   (admin-only) -> upload transcripts (id, title, text)
-//   POST /chat     (front-end)  -> answer using RAG; cites lecture titles only
+//   POST /ingest   (admin-only) -> upload transcripts [{ id, title, text }]
+//   POST /retitle  (admin-only) -> update a lecture title { id, title }
+//   POST /chat     (front-end)  -> RAG answer, cites lecture titles only
 //   POST /         (legacy)     -> same as /chat
-//   POST /retitle  (admin-only) -> update a lecture's display title after ingest
 
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-// ---- ENV ----
+// ---------- ENV ----------
 const OPENAI_API_KEY       = Deno.env.get("OPENAI_API_KEY");
 const OPENAI_MODEL         = Deno.env.get("OPENAI_MODEL") || "gpt-4o-mini";
 const EMBEDDING_MODEL      = Deno.env.get("EMBEDDING_MODEL") || "text-embedding-3-small";
@@ -16,20 +16,25 @@ const ADMIN_TOKEN          = Deno.env.get("ADMIN_TOKEN") || "";
 const QUALTRICS_API_TOKEN  = Deno.env.get("QUALTRICS_API_TOKEN");
 const QUALTRICS_SURVEY_ID  = Deno.env.get("QUALTRICS_SURVEY_ID");
 const QUALTRICS_DATACENTER = Deno.env.get("QUALTRICS_DATACENTER");
-const SYLLABUS_LINK        = Deno.env.get("SYLLABUS_LINK") || ""; // footer (guarded below)
+const SYLLABUS_LINK        = Deno.env.get("SYLLABUS_LINK") || "";
+
+// RAG knobs
+const STRICT_RAG = (Deno.env.get("STRICT_RAG") ?? "true").toLowerCase() === "true";
+const MIN_SCORE  = Number(Deno.env.get("RAG_MIN_SCORE") ?? "0.28");
+const TOP_K      = Number(Deno.env.get("RAG_TOP_K") ?? "3");
 
 const kv = await Deno.openKv();
 
-// ---- CORS ----
+// ---------- CORS ----------
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
-const cors = (body: string, status = 200, contentType = "text/plain") =>
-  new Response(body, { status, headers: { ...CORS_HEADERS, "Content-Type": contentType } });
+const cors = (body: string, status = 200, ct = "text/plain") =>
+  new Response(body, { status, headers: { ...CORS_HEADERS, "Content-Type": ct } });
 
-// ---- Utils ----
+// ---------- UTILS ----------
 function chunkByChars(s: string, max = 1700, overlap = 200) {
   const out: string[] = [];
   for (let i = 0; i < s.length; i += max - overlap) out.push(s.slice(i, i + max));
@@ -52,13 +57,12 @@ async function embedText(text: string): Promise<number[]> {
   return j.data[0].embedding as number[];
 }
 function safeFooter(): string {
-  // Only include a footer link if it looks like a real URL (avoid accidental token dumps)
   return /^https?:\/\//i.test(SYLLABUS_LINK)
     ? `\n\nThere may be errors in my responses; always refer to the course web page: ${SYLLABUS_LINK}`
     : `\n\nThere may be errors in my responses; consult the official course page.`;
 }
 
-// ---- /ingest (admin-only) ----
+// ---------- /ingest (admin-only) ----------
 // Body: { items: [{ id: string, title: string, text: string }, ...] }
 async function handleIngest(req: Request): Promise<Response> {
   if (req.headers.get("authorization") !== `Bearer ${ADMIN_TOKEN}`) return cors("unauthorized", 401);
@@ -78,7 +82,7 @@ async function handleIngest(req: Request): Promise<Response> {
   return cors("ok");
 }
 
-// ---- /retitle (admin-only) ----
+// ---------- /retitle (admin-only) ----------
 // Body: { id: string, title: string }
 async function handleRetitle(req: Request): Promise<Response> {
   if (req.headers.get("authorization") !== `Bearer ${ADMIN_TOKEN}`) return cors("unauthorized", 401);
@@ -91,7 +95,7 @@ async function handleRetitle(req: Request): Promise<Response> {
   return cors("ok");
 }
 
-// ---- /chat (front-end) ----
+// ---------- /chat (front-end) ----------
 // Body: { query: string }
 async function handleChat(req: Request): Promise<Response> {
   if (!OPENAI_API_KEY) return cors("Missing OpenAI API key", 500);
@@ -101,12 +105,13 @@ async function handleChat(req: Request): Promise<Response> {
   const userQuery = (body.query || "").trim();
   if (!userQuery) return cors("Missing 'query' in body", 400);
 
-  // Load syllabus context (optional)
   const syllabus = await Deno.readTextFile("syllabus.md").catch(() => "Error loading syllabus.");
 
-  // --- Retrieval: compute hits with correct title bound to each chunk ---
+  // Retrieval
   type Hit = { score: number; id: string; i: number; text: string; title: string };
   const hits: Hit[] = [];
+  let hadRetrievalError = false;
+
   try {
     const qv = await embedText(userQuery);
     for await (const entry of kv.list<{ e: number[] }>({ prefix: ["lec"] })) {
@@ -120,11 +125,16 @@ async function handleChat(req: Request): Promise<Response> {
         hits.push({ score, id, i, text: ch.value.text, title: meta.value.title });
       }
     }
-  } catch { /* if retrieval fails, proceed with syllabus-only */ }
+  } catch { hadRetrievalError = true; }
 
   hits.sort((a, b) => b.score - a.score);
-  const TOP_K = 3;
-  const top = hits.slice(0, TOP_K);
+
+  // strict filter + fallback
+  const filtered = hits.filter(h => h.score >= MIN_SCORE).slice(0, TOP_K);
+  if (STRICT_RAG && !filtered.length && !hadRetrievalError) {
+    return cors(`I can’t find this in the course materials I have. Please check lecture titles or rephrase.${safeFooter()}`);
+  }
+  const top = filtered.length ? filtered : hits.slice(0, TOP_K);
 
   const context = top.length
     ? top.map((h, idx) => `(${idx + 1}) ${h.title}\n${h.text}`).join("\n\n---\n\n")
@@ -132,15 +142,20 @@ async function handleChat(req: Request): Promise<Response> {
 
   const sourceTitles = Array.from(new Set(top.map(h => h.title)));
 
-  // Build chat messages
+  // Messages
   const messages = [
-    { role: "system" as const, content: "You are an accurate assistant. Use the CONTEXT when provided. Do not mention transcripts or retrieval." },
+    {
+      role: "system" as const,
+      content: STRICT_RAG
+        ? "Answer ONLY using the CONTEXT and the syllabus text provided. If the answer is not in the CONTEXT/syllabus, say you don’t have that information. Do not speculate. Do not mention transcripts or retrieval."
+        : "Use the CONTEXT and syllabus when provided. Prefer them over prior knowledge. Do not mention transcripts or retrieval."
+    },
     { role: "system" as const, content: `Here is important context from syllabus.md:\n${syllabus}` },
     { role: "system" as const, content: "After your answer, add a line starting with 'Sources:' followed by the lecture titles you used, separated by semicolons. Cite titles ONLY." },
     { role: "user"   as const, content: context ? `QUESTION:\n${userQuery}\n\nCONTEXT:\n${context}` : userQuery },
   ];
 
-  // Call OpenAI
+  // OpenAI call
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
@@ -149,13 +164,13 @@ async function handleChat(req: Request): Promise<Response> {
   const j = await r.json();
   const base = j?.choices?.[0]?.message?.content || "No response from OpenAI";
 
-  // Ensure Sources line exists and uses the real titles
+  // Ensure Sources line
   let reply = base;
   if (sourceTitles.length && !/^\s*Sources:/im.test(base)) {
     reply += `\n\nSources: ${sourceTitles.join("; ")}`;
   }
 
-  // Qualtrics logging (optional, unchanged)
+  // Qualtrics logging
   let qualtricsStatus = "Qualtrics not called";
   if (QUALTRICS_API_TOKEN && QUALTRICS_SURVEY_ID && QUALTRICS_DATACENTER) {
     try {
@@ -176,10 +191,10 @@ async function handleChat(req: Request): Promise<Response> {
   return cors(`${reply}${safeFooter()}\n<!-- ${qualtricsStatus} -->`);
 }
 
-// ---- Legacy root -> same as /chat ----
+// ---------- legacy root ----------
 const handleRoot = handleChat;
 
-// ---- Router ----
+// ---------- Router ----------
 serve(async (req: Request): Promise<Response> => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
   if (req.method !== "POST")   return cors("Method Not Allowed", 405);
@@ -189,5 +204,5 @@ serve(async (req: Request): Promise<Response> => {
   if (path === "/retitle") return handleRetitle(req);
   if (path === "/chat")    return handleChat(req);
   if (path === "/")        return handleRoot(req);
-  return handleChat(req); // default
+  return handleChat(req);
 });
