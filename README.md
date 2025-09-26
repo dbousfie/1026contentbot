@@ -1,4 +1,4 @@
-# Course Bot (OpenAI + Deno + RAG)
+# Course content bot (OpenAI + Deno + RAG)
 
 Minimal bot that answers course/assignment questions using **your transcripts + syllabus** as context.  
 Embeds in Brightspace and can optionally log to Qualtrics.
