@@ -1,46 +1,47 @@
-// main.ts
-// - Keeps your existing Qualtrics + syllabus flow
-// - Adds private RAG via Deno KV
-// - Two new routes: POST /ingest (admin-only), POST /chat (public from your front end)
+// main.ts — RAG + Qualtrics + syllabus, with fixed titles & sources
+// Routes:
+//   POST /ingest   (admin-only) -> upload transcripts (id, title, text)
+//   POST /chat     (front-end)  -> answer using RAG; cites lecture titles only
+//   POST /         (legacy)     -> same as /chat
+//   POST /retitle  (admin-only) -> update a lecture's display title after ingest
 
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 // ---- ENV ----
-const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
-const QUALTRICS_API_TOKEN = Deno.env.get("QUALTRICS_API_TOKEN");
-const QUALTRICS_SURVEY_ID = Deno.env.get("QUALTRICS_SURVEY_ID");
+const OPENAI_API_KEY       = Deno.env.get("OPENAI_API_KEY");
+const OPENAI_MODEL         = Deno.env.get("OPENAI_MODEL") || "gpt-4o-mini";
+const EMBEDDING_MODEL      = Deno.env.get("EMBEDDING_MODEL") || "text-embedding-3-small";
+const ADMIN_TOKEN          = Deno.env.get("ADMIN_TOKEN") || "";
+
+const QUALTRICS_API_TOKEN  = Deno.env.get("QUALTRICS_API_TOKEN");
+const QUALTRICS_SURVEY_ID  = Deno.env.get("QUALTRICS_SURVEY_ID");
 const QUALTRICS_DATACENTER = Deno.env.get("QUALTRICS_DATACENTER");
-const SYLLABUS_LINK = Deno.env.get("SYLLABUS_LINK") || "";
-const OPENAI_MODEL = Deno.env.get("OPENAI_MODEL") || "gpt-4o-mini";           // chat model
-const EMBEDDING_MODEL = Deno.env.get("EMBEDDING_MODEL") || "text-embedding-3-small";
-const ADMIN_TOKEN = Deno.env.get("ADMIN_TOKEN") || "";                        // for /ingest
+const SYLLABUS_LINK        = Deno.env.get("SYLLABUS_LINK") || ""; // footer (guarded below)
+
 const kv = await Deno.openKv();
 
-// ---- CORS helpers ----
+// ---- CORS ----
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
+const cors = (body: string, status = 200, contentType = "text/plain") =>
+  new Response(body, { status, headers: { ...CORS_HEADERS, "Content-Type": contentType } });
 
-function corsResponse(body: string, status = 200, contentType = "text/plain") {
-  return new Response(body, { status, headers: { ...CORS_HEADERS, "Content-Type": contentType } });
-}
-
-// ---- Small utilities ----
+// ---- Utils ----
 function chunkByChars(s: string, max = 1700, overlap = 200) {
   const out: string[] = [];
   for (let i = 0; i < s.length; i += max - overlap) out.push(s.slice(i, i + max));
   return out;
 }
-
 function cosine(a: number[], b: number[]) {
   let d = 0, na = 0, nb = 0;
-  for (let i = 0; i < a.length; i++) { d += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  for (let i = 0; i < a.length; i++) { d += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i]; }
   return d / (Math.sqrt(na) * Math.sqrt(nb) + 1e-8);
 }
-
 async function embedText(text: string): Promise<number[]> {
+  if (!OPENAI_API_KEY) throw new Error("Missing OpenAI API key");
   const r = await fetch("https://api.openai.com/v1/embeddings", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
@@ -50,20 +51,19 @@ async function embedText(text: string): Promise<number[]> {
   const j = await r.json();
   return j.data[0].embedding as number[];
 }
+function safeFooter(): string {
+  // Only include a footer link if it looks like a real URL (avoid accidental token dumps)
+  return /^https?:\/\//i.test(SYLLABUS_LINK)
+    ? `\n\nThere may be errors in my responses; always refer to the course web page: ${SYLLABUS_LINK}`
+    : `\n\nThere may be errors in my responses; consult the official course page.`;
+}
 
-// ---- RAG: INGEST (admin-only) ----
+// ---- /ingest (admin-only) ----
 // Body: { items: [{ id: string, title: string, text: string }, ...] }
 async function handleIngest(req: Request): Promise<Response> {
-  if (!OPENAI_API_KEY) return corsResponse("Missing OpenAI API key", 500);
-  if (req.headers.get("authorization") !== `Bearer ${ADMIN_TOKEN}`) {
-    return corsResponse("unauthorized", 401);
-  }
+  if (req.headers.get("authorization") !== `Bearer ${ADMIN_TOKEN}`) return cors("unauthorized", 401);
   let payload: { items: { id: string; title: string; text: string }[] };
-  try {
-    payload = await req.json();
-  } catch {
-    return corsResponse("Invalid JSON", 400);
-  }
+  try { payload = await req.json(); } catch { return cors("Invalid JSON", 400); }
   const items = payload.items || [];
   for (const it of items) {
     const parts = chunkByChars(it.text);
@@ -71,138 +71,100 @@ async function handleIngest(req: Request): Promise<Response> {
     for (let i = 0; i < parts.length; i++) {
       const text = parts[i];
       const e = await embedText(text);
-      await kv.set(["lec", it.id, "chunk", i], { text });  // each value well under 64 KiB
-      await kv.set(["lec", it.id, "vec", i], { e });
+      await kv.set(["lec", it.id, "chunk", i], { text }); // << 64KiB
+      await kv.set(["lec", it.id, "vec",   i], { e });
     }
   }
-  return corsResponse("ok");
+  return cors("ok");
 }
 
-// ---- RAG: CHAT (front end) ----
+// ---- /retitle (admin-only) ----
+// Body: { id: string, title: string }
+async function handleRetitle(req: Request): Promise<Response> {
+  if (req.headers.get("authorization") !== `Bearer ${ADMIN_TOKEN}`) return cors("unauthorized", 401);
+  let body: { id?: string; title?: string } = {};
+  try { body = await req.json(); } catch { return cors("Invalid JSON", 400); }
+  if (!body.id || !body.title) return cors("id and title required", 400);
+  const meta = await kv.get<{ title: string; n: number }>(["lec", body.id, "meta"]);
+  if (!meta.value) return cors("not found", 404);
+  await kv.set(["lec", body.id, "meta"], { ...meta.value, title: body.title });
+  return cors("ok");
+}
+
+// ---- /chat (front-end) ----
 // Body: { query: string }
 async function handleChat(req: Request): Promise<Response> {
-  if (!OPENAI_API_KEY) return corsResponse("Missing OpenAI API key", 500);
+  if (!OPENAI_API_KEY) return cors("Missing OpenAI API key", 500);
 
-  // Parse body
   let body: { query?: string } = {};
-  try {
-    body = await req.json();
-  } catch {
-    return corsResponse("Invalid JSON", 400);
-  }
+  try { body = await req.json(); } catch { return cors("Invalid JSON", 400); }
   const userQuery = (body.query || "").trim();
-  if (!userQuery) return corsResponse("Missing 'query' in body", 400);
+  if (!userQuery) return cors("Missing 'query' in body", 400);
 
-  // Load syllabus (same as your existing flow; if missing, keep going)
+  // Load syllabus context (optional)
   const syllabus = await Deno.readTextFile("syllabus.md").catch(() => "Error loading syllabus.");
 
-  // --- Retrieval from KV (if any vectors are present) ---
-  let contextChunks: string[] = [];
-  let sourceTitles: string[] = [];
+  // --- Retrieval: compute hits with correct title bound to each chunk ---
+  type Hit = { score: number; id: string; i: number; text: string; title: string };
+  const hits: Hit[] = [];
   try {
     const qv = await embedText(userQuery);
-
-    // Scan all vectors (fine for your course size; can index later if needed)
-    const hits: { score: number; id: string; i: number }[] = [];
     for await (const entry of kv.list<{ e: number[] }>({ prefix: ["lec"] })) {
-      // key shape: ["lec", <id>, "vec"|"chunk"|"meta", i?]
       const key = entry.key as Deno.KvKey;
       if (key.length === 4 && key[0] === "lec" && key[2] === "vec") {
-        const id = String(key[1]);
-        const i = Number(key[3]);
+        const id = String(key[1]); const i = Number(key[3]);
         const score = cosine(qv, entry.value.e);
-        hits.push({ score, id, i });
+        const ch   = await kv.get<{ text: string }>(["lec", id, "chunk", i]);
+        const meta = await kv.get<{ title: string }>(["lec", id, "meta"]);
+        if (!ch.value?.text || !meta.value?.title) continue;
+        hits.push({ score, id, i, text: ch.value.text, title: meta.value.title });
       }
     }
-    hits.sort((a, b) => b.score - a.score);
-    const TOP_K = 3;
-    const top = hits.slice(0, TOP_K);
+  } catch { /* if retrieval fails, proceed with syllabus-only */ }
 
-    // Gather chunk texts and titles (titles only for citations)
-    const titlesSet = new Set<string>();
-    for (const h of top) {
-      const ch = await kv.get<{ text: string }>(["lec", h.id, "chunk", h.i]);
-      if (ch.value?.text) contextChunks.push(ch.value.text);
-      const meta = await kv.get<{ title: string }>(["lec", h.id, "meta"]);
-      if (meta.value?.title) titlesSet.add(meta.value.title);
-    }
-    sourceTitles = Array.from(titlesSet);
-  } catch {
-    // If retrieval fails for any reason, fall back to syllabus-only
-    contextChunks = [];
-    sourceTitles = [];
-  }
+  hits.sort((a, b) => b.score - a.score);
+  const TOP_K = 3;
+  const top = hits.slice(0, TOP_K);
 
-  // Build the messages
-  const ragContext = contextChunks.length
-    ? contextChunks.map((t, i) => `(${i + 1}) ${t}`).join("\n\n---\n\n")
+  const context = top.length
+    ? top.map((h, idx) => `(${idx + 1}) ${h.title}\n${h.text}`).join("\n\n---\n\n")
     : "";
 
+  const sourceTitles = Array.from(new Set(top.map(h => h.title)));
+
+  // Build chat messages
   const messages = [
-    {
-      role: "system",
-      content:
-        "You are an accurate assistant. Use provided CONTEXT when available. Do not mention transcripts or retrieval. Cite lecture titles only.",
-    },
-    { role: "system", content: `Here is important context from syllabus.md:\n${syllabus}` },
-    {
-      role: "system",
-      content:
-        "When you rely on course material, end with a line: 'Sources: <Lecture Title 1>; <Lecture Title 2>; ...'",
-    },
-    {
-      role: "user",
-      content:
-        ragContext
-          ? `QUESTION:\n${userQuery}\n\nCONTEXT:\n${ragContext}`
-          : userQuery,
-    },
+    { role: "system" as const, content: "You are an accurate assistant. Use the CONTEXT when provided. Do not mention transcripts or retrieval." },
+    { role: "system" as const, content: `Here is important context from syllabus.md:\n${syllabus}` },
+    { role: "system" as const, content: "After your answer, add a line starting with 'Sources:' followed by the lecture titles you used, separated by semicolons. Cite titles ONLY." },
+    { role: "user"   as const, content: context ? `QUESTION:\n${userQuery}\n\nCONTEXT:\n${context}` : userQuery },
   ];
 
-  // Call OpenAI Chat
-  const openaiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+  // Call OpenAI
+  const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      messages,
-      temperature: 0.2,
-      max_tokens: 1500,
-    }),
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+    body: JSON.stringify({ model: OPENAI_MODEL, messages, temperature: 0.2, max_tokens: 1500 }),
   });
+  const j = await r.json();
+  const base = j?.choices?.[0]?.message?.content || "No response from OpenAI";
 
-  const openaiJson = await openaiResponse.json();
-  const baseResponse =
-    openaiJson?.choices?.[0]?.message?.content || "No response from OpenAI";
-
-  // Ensure Sources line (titles only) if we had matches and the model forgot
-  let reply = baseResponse;
-  if (sourceTitles.length && !/^\s*Sources:/im.test(baseResponse)) {
+  // Ensure Sources line exists and uses the real titles
+  let reply = base;
+  if (sourceTitles.length && !/^\s*Sources:/im.test(base)) {
     reply += `\n\nSources: ${sourceTitles.join("; ")}`;
   }
 
-  // Append your syllabus note (kept from your original file)
-  const result = `${reply}\n\nThere may be errors in my responses; always refer to the course web page: ${SYLLABUS_LINK}`;
-
-  // Qualtrics logging (kept)
+  // Qualtrics logging (optional, unchanged)
   let qualtricsStatus = "Qualtrics not called";
   if (QUALTRICS_API_TOKEN && QUALTRICS_SURVEY_ID && QUALTRICS_DATACENTER) {
-    const qualtricsPayload = {
-      values: { responseText: result, queryText: userQuery },
-    };
     try {
       const qt = await fetch(
         `https://${QUALTRICS_DATACENTER}.qualtrics.com/API/v3/surveys/${QUALTRICS_SURVEY_ID}/responses`,
         {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-API-TOKEN": QUALTRICS_API_TOKEN,
-          },
-          body: JSON.stringify(qualtricsPayload),
+          headers: { "Content-Type": "application/json", "X-API-TOKEN": QUALTRICS_API_TOKEN },
+          body: JSON.stringify({ values: { responseText: reply + safeFooter(), queryText: userQuery } }),
         },
       );
       qualtricsStatus = `Qualtrics status: ${qt.status}`;
@@ -211,29 +173,21 @@ async function handleChat(req: Request): Promise<Response> {
     }
   }
 
-  return corsResponse(`${result}\n<!-- ${qualtricsStatus} -->`);
+  return cors(`${reply}${safeFooter()}\n<!-- ${qualtricsStatus} -->`);
 }
 
-// ---- Legacy handler (kept): POST / behaves like /chat ----
-async function handleRoot(req: Request): Promise<Response> {
-  // Keep backward compatibility for your existing front end that POSTs to "/"
-  return handleChat(req);
-}
+// ---- Legacy root -> same as /chat ----
+const handleRoot = handleChat;
 
 // ---- Router ----
 serve(async (req: Request): Promise<Response> => {
-  if (req.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: CORS_HEADERS });
-  }
-  if (req.method !== "POST") {
-    return corsResponse("Method Not Allowed", 405);
-  }
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
+  if (req.method !== "POST")   return cors("Method Not Allowed", 405);
 
   const path = new URL(req.url).pathname;
-  if (path === "/ingest") return handleIngest(req);
-  if (path === "/chat") return handleChat(req);
-  if (path === "/") return handleRoot(req); // legacy
-
-  // default: also treat unknown POSTs as /chat for safety
-  return handleChat(req);
+  if (path === "/ingest")  return handleIngest(req);
+  if (path === "/retitle") return handleRetitle(req);
+  if (path === "/chat")    return handleChat(req);
+  if (path === "/")        return handleRoot(req);
+  return handleChat(req); // default
 });
