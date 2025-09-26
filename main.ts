@@ -13,7 +13,7 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 const OPENAI_API_KEY       = Deno.env.get("OPENAI_API_KEY");
 const OPENAI_MODEL         = Deno.env.get("OPENAI_MODEL") || "gpt-4o-mini";
 const EMBEDDING_MODEL      = Deno.env.get("EMBEDDING_MODEL") || "text-embedding-3-small";
-const ADMIN_TOKEN          = Deno.env.get("ADMIN_TOKEN") || "";
+const ADMIN_TOKEN          = (Deno.env.get("ADMIN_TOKEN") || "").trim();
 
 const QUALTRICS_API_TOKEN  = Deno.env.get("QUALTRICS_API_TOKEN");
 const QUALTRICS_SURVEY_ID  = Deno.env.get("QUALTRICS_SURVEY_ID");
@@ -31,10 +31,23 @@ const kv = await Deno.openKv();
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Admin-Token",
 };
 const cors = (body: string, status = 200, ct = "text/plain") =>
   new Response(body, { status, headers: { ...CORS_HEADERS, "Content-Type": ct } });
+
+// ---------- AUTH (whitespace- & header-safe) ----------
+function adminTokenFrom(req: Request): string {
+  const auth = req.headers.get("authorization") || "";
+  const alt  = req.headers.get("x-admin-token") || "";
+  let bearer = "";
+  if (/^Bearer\b/i.test(auth)) bearer = auth.replace(/^Bearer\s+/i, "");
+  return (bearer || alt).trim();
+}
+function requireAdmin(req: Request): boolean {
+  if (!ADMIN_TOKEN) return false;
+  return adminTokenFrom(req) === ADMIN_TOKEN;
+}
 
 // ---------- UTILS ----------
 function chunkByChars(s: string, max = 1700, overlap = 200) {
@@ -65,9 +78,8 @@ function safeFooter(): string {
 }
 
 // ---------- /ingest (admin-only) ----------
-// Body: { items: [{ id: string, title: string, text: string }, ...] }
 async function handleIngest(req: Request): Promise<Response> {
-  if (req.headers.get("authorization") !== `Bearer ${ADMIN_TOKEN}`) return cors("unauthorized", 401);
+  if (!requireAdmin(req)) return cors("unauthorized", 401);
   let payload: { items: { id: string; title: string; text: string }[] };
   try { payload = await req.json(); } catch { return cors("Invalid JSON", 400); }
   const items = payload.items || [];
@@ -77,7 +89,7 @@ async function handleIngest(req: Request): Promise<Response> {
     for (let i = 0; i < parts.length; i++) {
       const text = parts[i];
       const e = await embedText(text);
-      await kv.set(["lec", it.id, "chunk", i], { text }); // each <= 64KiB
+      await kv.set(["lec", it.id, "chunk", i], { text }); // <= 64KiB each
       await kv.set(["lec", it.id, "vec",   i], { e });
     }
   }
@@ -85,9 +97,8 @@ async function handleIngest(req: Request): Promise<Response> {
 }
 
 // ---------- /retitle (admin-only) ----------
-// Body: { id: string, title: string }
 async function handleRetitle(req: Request): Promise<Response> {
-  if (req.headers.get("authorization") !== `Bearer ${ADMIN_TOKEN}`) return cors("unauthorized", 401);
+  if (!requireAdmin(req)) return cors("unauthorized", 401);
   let body: { id?: string; title?: string } = {};
   try { body = await req.json(); } catch { return cors("Invalid JSON", 400); }
   if (!body.id || !body.title) return cors("id and title required", 400);
@@ -99,7 +110,7 @@ async function handleRetitle(req: Request): Promise<Response> {
 
 // ---------- /wipe (admin-only) ----------
 async function handleWipe(req: Request): Promise<Response> {
-  if (req.headers.get("authorization") !== `Bearer ${ADMIN_TOKEN}`) return cors("unauthorized", 401);
+  if (!requireAdmin(req)) return cors("unauthorized", 401);
   let deleted = 0;
   for await (const e of kv.list({ prefix: ["lec"] })) {
     await kv.delete(e.key);
@@ -110,7 +121,7 @@ async function handleWipe(req: Request): Promise<Response> {
 
 // ---------- /stats (admin-only) ----------
 async function handleStats(req: Request): Promise<Response> {
-  if (req.headers.get("authorization") !== `Bearer ${ADMIN_TOKEN}`) return cors("unauthorized", 401);
+  if (!requireAdmin(req)) return cors("unauthorized", 401);
   let chunks = 0, vecs = 0, lectures = 0;
   const titles = new Set<string>();
   for await (const e of kv.list({ prefix: ["lec"] })) {
@@ -124,7 +135,6 @@ async function handleStats(req: Request): Promise<Response> {
 }
 
 // ---------- /chat (front-end) ----------
-// Body: { query: string }
 async function handleChat(req: Request): Promise<Response> {
   if (!OPENAI_API_KEY) return cors("Missing OpenAI API key", 500);
 
@@ -135,7 +145,6 @@ async function handleChat(req: Request): Promise<Response> {
 
   const syllabus = await Deno.readTextFile("syllabus.md").catch(() => "Error loading syllabus.");
 
-  // Retrieval
   type Hit = { score: number; id: string; i: number; text: string; title: string };
   const hits: Hit[] = [];
   let hadRetrievalError = false;
@@ -157,7 +166,6 @@ async function handleChat(req: Request): Promise<Response> {
 
   hits.sort((a, b) => b.score - a.score);
 
-  // strict filter + fallback
   const filtered = hits.filter(h => h.score >= MIN_SCORE).slice(0, TOP_K);
   if (STRICT_RAG && !filtered.length && !hadRetrievalError) {
     return cors(`I can’t find this in the course materials I have. Please check lecture titles or rephrase.${safeFooter()}`);
@@ -170,7 +178,6 @@ async function handleChat(req: Request): Promise<Response> {
 
   const sourceTitles = Array.from(new Set(top.map(h => h.title)));
 
-  // Messages
   const messages = [
     {
       role: "system" as const,
@@ -183,7 +190,6 @@ async function handleChat(req: Request): Promise<Response> {
     { role: "user"   as const, content: context ? `QUESTION:\n${userQuery}\n\nCONTEXT:\n${context}` : userQuery },
   ];
 
-  // OpenAI call
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
@@ -192,13 +198,11 @@ async function handleChat(req: Request): Promise<Response> {
   const j = await r.json();
   const base = j?.choices?.[0]?.message?.content || "No response from OpenAI";
 
-  // Ensure Sources line
   let reply = base;
   if (sourceTitles.length && !/^\s*Sources:/im.test(base)) {
     reply += `\n\nSources: ${sourceTitles.join("; ")}`;
   }
 
-  // Qualtrics logging
   let qualtricsStatus = "Qualtrics not called";
   if (QUALTRICS_API_TOKEN && QUALTRICS_SURVEY_ID && QUALTRICS_DATACENTER) {
     try {
