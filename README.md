@@ -1,66 +1,90 @@
-# Syllabus Bot (OpenAI, Deno)
+# Course Bot (OpenAI + Deno + RAG)
 
-Minimal bot that answers course/assignment questions using OpenAI with `syllabus.md` as context. Embeds in Brightspace and can optionally log to Qualtrics.
+Minimal bot that answers course/assignment questions using **your transcripts + syllabus** as context.  
+Embeds in Brightspace and can optionally log to Qualtrics.
 
 ## Features
-- Accepts free-text questions
-- Calls OpenAI with `syllabus.md`
+- Accepts free-text student questions
+- Retrieves relevant transcript chunks from your lecture set (`/ingest`)
+- Uses OpenAI to generate answers **grounded in course materials**
+- Appends `Sources:` line with lecture titles (no transcript text exposed)
+- Strict mode: refuses to answer if the info isn’t in your course materials
 - Optionally logs `{queryText, responseText}` to Qualtrics
 - Works as a standalone web page or Brightspace embed
 
 ## 1. Create your copy
-- Use this template on GitHub (e.g., `syllabus-bot-3210`, `paragraph-marker`)
+- Use this template on GitHub (e.g., `course-bot-1026`)
+- Make sure `main.ts`, `index.html`, and `brightspace.html` are included
 
-## 2. Replace syllabus content
-- Edit `syllabus.md` with your course policies or grading criteria (this text is sent with each query)
+## 2. Add syllabus + transcripts
+- Edit `syllabus.md` with your policies or grading criteria
+- Place lecture transcripts (`.txt`) in a folder (e.g. `1026t/`)
+- Run the ingest script to load them into Deno KV:
+
+```sh
+deno run -A ingest_1026t.ts --token=YOUR_ADMIN_TOKEN
+```
+
+You should see progress like `Ingested 8/98 … Done.`
 
 ## 3. Deploy backend to Deno
 - Sign in at https://dash.deno.com → **+ New Project** → **Import from GitHub**
-- Select your repo
 - Entry point: `main.ts`
 - Production branch: `main`
-- Create the project (you'll get a `https://<name>.deno.dev` URL)
+- Create the project (you’ll get a `https://<name>.deno.dev` URL)
 
 ## 4. Add environment variables
 In **Deno → Settings → Environment Variables**, add:
 
-    OPENAI_API_KEY=your OpenAI API key
-    SYLLABUS_LINK=public link to the syllabus or course webpage
-    QUALTRICS_API_TOKEN=(optional)
-    QUALTRICS_SURVEY_ID=(optional)
-    QUALTRICS_DATACENTER=(optional, e.g., uwo.eu)
-    OPENAI_MODEL=(optional, default gpt-4o-mini)
+```text
+OPENAI_API_KEY=sk-your-openai-key
+SYLLABUS_LINK=https://brightspace.university.edu/course/syllabus
+QUALTRICS_API_TOKEN=(optional)
+QUALTRICS_SURVEY_ID=(optional)
+QUALTRICS_DATACENTER=(optional, e.g., uwo.eu)
+OPENAI_MODEL=(optional, default gpt-4o-mini)
+ADMIN_TOKEN=your-secret-token
+STRICT_RAG=true            # restrict to transcripts + syllabus only
+RAG_MIN_SCORE=0.28         # similarity threshold
+RAG_TOP_K=3                # number of chunks retrieved
+```
 
 ## 5. Point the frontend to your backend
-In `index.html`, replace the fetch URL with your Deno URL, e.g.:
+In `index.html` (or `brightspace.html`), replace the fetch URL with your Deno URL:
 
-    fetch("https://your-app-name.deno.dev/", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query: userQuery })
-    });
+```js
+fetch("https://your-app-name.deno.dev/chat", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ query: userQuery })
+});
+```
+
+⚠️ Make sure you hit `/chat` (not just `/`) to use transcript RAG.
 
 ## 6. Host the frontend (GitHub Pages)
 - Repo → **Settings → Pages**
 - Branch: `main`, Folder: `/ (root)` → **Save**
-- Use the published URL (e.g., `https://yourusername.github.io/yourbot/`)
-- For Brightspace, you can also paste `brightspace.html` as a content item or widget
+- Use the published URL (e.g., `https://yourusername.github.io/course-bot/`)
+- For Brightspace, paste `brightspace.html` into a content item or widget
 
 ## Notes
-- CORS headers are returned by `main.ts`, so the Brightspace iframe can call your backend.
-- Each deployment has its own backend; ensure the frontend fetch URL matches the correct Deno project.
-- Responses are capped at **1500 tokens**; increase `max_tokens` in `main.ts` if you need longer answers.
-- Hitting OpenAI usage/quota limits may surface as a generic server error—retry or switch to a cheaper model via `OPENAI_MODEL`.
+- CORS headers are included, so Brightspace iframes can call your backend.
+- Responses always end with a `Sources:` line listing lecture titles.
+- If strict mode is on and no match is found, the bot politely refuses.
+- Responses are capped at **1500 tokens** (edit `max_tokens` in `main.ts` if needed).
+- If you hit OpenAI quota/limits, switch to a cheaper model via `OPENAI_MODEL`.
 
 ## Qualtrics (optional)
 - In your survey, add embedded data fields: `responseText`, `queryText`.
-- The response includes an HTML comment like `<!-- Qualtrics status: 200 -->` to confirm logging.
+- Responses include an HTML comment like `<!-- Qualtrics status: 200 -->` for logging confirmation.
 
 ## Files
-- `index.html` — public interface
-- `brightspace.html` — LMS-friendly wrapper
-- `main.ts` — Deno backend (OpenAI API)
-- `syllabus.md` — syllabus/grading text used as context
+- `index.html` — student-facing interface
+- `brightspace.html` — LMS wrapper
+- `main.ts` — Deno backend (RAG + OpenAI + Qualtrics)
+- `syllabus.md` — syllabus text
+- `ingest_*.ts` — script to load transcripts into KV
 - `README.md` — this file
 
 ## License
