@@ -2,36 +2,86 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>1026 course content bot</title>
+  <title>1026 Course Content Bot</title>
   <link href="https://fonts.googleapis.com/css2?family=Lato&display=swap" rel="stylesheet" />
   <style>
+    :root {
+      --dark-green: #064e3b;  /* Evergreen */
+      --light-green: #d1fae5; /* Soft minty green */
+    }
+
     body {
       font-family: 'Lato', sans-serif;
       margin: 2rem;
+      color: var(--dark-green);
+      background-color: var(--light-green);
+
+      /* dark green watermark across background */
+      background-image:
+        url("data:image/svg+xml;utf8,\
+<svg xmlns='http://www.w3.org/2000/svg' width='900' height='320'>\
+  <rect width='100%' height='100%' fill='none'/>\
+  <g transform='rotate(-30 0 0)'>\
+    <text x='0' y='40' fill='%23064e3b' fill-opacity='0.12' font-size='26' font-family='Lato, Arial, sans-serif'>ONLY CONTENT QUESTIONS WEEKS 1-4 • ONLY CONTENT QUESTIONS WEEKS 1-4 •</text>\
+    <text x='0' y='140' fill='%23064e3b' fill-opacity='0.12' font-size='26' font-family='Lato, Arial, sans-serif'>ONLY CONTENT QUESTIONS WEEKS 1-4 • ONLY CONTENT QUESTIONS WEEKS 1-4 •</text>\
+    <text x='0' y='240' fill='%23064e3b' fill-opacity='0.12' font-size='26' font-family='Lato, Arial, sans-serif'>ONLY CONTENT QUESTIONS WEEKS 1-4 • ONLY CONTENT QUESTIONS WEEKS 1-4 •</text>\
+  </g>\
+</svg>");
+      background-repeat: repeat;
+      background-size: 900px 320px;
+      background-attachment: fixed;
     }
+
     textarea {
       font-family: monospace;
       width: 100%;
       max-width: 600px;
+      background-color: rgba(255,255,255,0.9);
+      color: #000;
+      border: 1px solid #aaa;
+      padding: .5rem;
+      border-radius: .25rem;
     }
+
+    textarea::placeholder {
+      color: var(--dark-green);
+    }
+
     #response {
       white-space: pre-wrap;
       margin-top: 1rem;
       padding: 1rem;
-      background: #f4f4f4;
-      border: 1px solid #ccc;
+      background: rgba(255,255,255,0.9);
+      border: 1px solid #aaa;
       max-width: 600px;
+      color: #000;
+      border-radius: .25rem;
+    }
+
+    button {
+      background-color: var(--dark-green);
+      color: #fff;
+      border: none;
+      padding: 0.5rem 1rem;
+      font-size: 1rem;
+      cursor: pointer;
+      border-radius: .35rem;
+    }
+
+    button:hover {
+      filter: brightness(1.1);
     }
   </style>
 </head>
 <body>
-  <h2>1026 Weeks 1-4 lecture content questions here (still experimental)</h2>
+  <h2>1026 Weeks 1-4 Lecture Content Questions (Experimental)</h2>
   <form id="queryForm">
     <textarea name="query" id="query" rows="5" cols="60" placeholder="Type your question about lecture content here..."></textarea><br />
     <button type="submit">Submit</button>
   </form>
+
   <h3>Response:</h3>
- <h5> all queries and responses are anonymously recorded by qualitrics for feedback, research and improvement</h5>
+  <h5>All queries and responses are anonymously recorded by Qualtrics for feedback, research and improvement</h5>
   <pre id="response"></pre>
 
   <script>
