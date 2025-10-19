@@ -1,23 +1,64 @@
 <!doctype html>
-<meta charset="utf-8">
-<title>Content Bot Disabled for Midterm</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  :root { --w: 720px; }
-  body { font: 16px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; }
-  .wrap { max-width: var(--w); margin: 0 auto; padding: 2.5rem 1.25rem; }
-  h1 { font-size: 1.75rem; margin: 0 0 0.75rem; }
-  .notice { background: #fff3cd; border: 1px solid #ffe08a; padding: 1rem; border-radius: 12px; }
-  .muted { color: #555; }
-</style>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Content Bot Disabled for Midterm</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
 
-<div class="wrap">
-  <h1>Content Bot Unavailable</h1>
-  <p class="notice">
-    The course content bot is <strong>disabled during the midterm exam</strong>.
-    The midterm begins at <strong>6:00 p.m. sharp</strong>
-    <span class="muted">(Eastern Time)</span>. The bot will return after the exam window closes.
-  </p>
+    <!-- Disable all caching -->
+    <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
 
-  <p class="muted">If you’re seeing this outside the exam window, please try again in a few minutes or refresh the page.</p>
-</div>
+    <style>
+      :root { --max: 720px; }
+      body {
+        font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        margin: 0;
+        background: #fafafa;
+        color: #111;
+      }
+      main {
+        max-width: var(--max);
+        margin: 6vh auto;
+        padding: 2rem;
+        background: white;
+        border-radius: 14px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
+      }
+      h1 {
+        font-size: 1.8rem;
+        margin-bottom: 1rem;
+      }
+      p {
+        margin: 0.5rem 0;
+      }
+      .highlight {
+        background: #fff3cd;
+        border: 1px solid #ffe08a;
+        padding: 1rem;
+        border-radius: 10px;
+      }
+      .muted {
+        color: #555;
+        margin-top: 1rem;
+        font-size: 0.9rem;
+      }
+    </style>
+  </head>
+
+  <body>
+    <main>
+      <h1>Content Bot Disabled During Midterm</h1>
+      <div class="highlight">
+        <p>The course content bot is <strong>offline during the midterm exam</strong>.</p>
+        <p><strong>The midterm begins at 6:00 p.m. sharp (Eastern Time).</strong></p>
+        <p>The bot will return after the exam window closes.</p>
+      </div>
+      <p class="muted">
+        If you still see the old page, please refresh your browser using
+        <kbd>Ctrl + Shift + R</kbd> (Windows) or <kbd>⌘ + Shift + R</kbd> (Mac).
+      </p>
+    </main>
+  </body>
+</html>
