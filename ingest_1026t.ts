@@ -52,3 +52,5 @@ for (let i = 0; i < entries.length; i += BATCH) {
   console.log(`Ingested ${i + items.length}/${entries.length}`);
 }
 console.log("Done.");
+
+
